@@ -22,6 +22,7 @@ from typing import List, Optional
 log = logging.getLogger("drive_debrief.vision")
 
 MODEL = "claude-opus-4-8"  # most capable; high-resolution multi-image vision
+FRAME_INTERVAL_S = 4.0      # one sampled frame every N seconds
 
 _FRAME_SCHEMA = {
     "type": "object",
@@ -98,7 +99,7 @@ def download_video(url: str, out_dir: str, max_height: int = 480) -> str:
     return files[0]
 
 
-def extract_frames(video_path: str, out_dir: str, every_seconds: float = 4.0,
+def extract_frames(video_path: str, out_dir: str, every_seconds: float = FRAME_INTERVAL_S,
                    max_frames: int = 8, width: int = 768) -> List[str]:
     """Sample frames with ffmpeg (scaled down to keep token cost sane)."""
     if not _have("ffmpeg"):
@@ -173,31 +174,40 @@ def analyse_frames(frame_paths: List[str], api_key: Optional[str] = None) -> dic
     return json.loads(text)
 
 
-def _frames_and_analyse(video_path: str, work: str, api_key, max_frames: int, label: str) -> dict:
-    frames = extract_frames(video_path, work, max_frames=max_frames)
+def _frames_and_analyse(video_path: str, work: str, api_key, max_frames: int,
+                        label: str, frames_dir: Optional[str] = None) -> dict:
+    # When frames_dir is given, keep the frames there (for the timeline page).
+    dest = frames_dir or work
+    if frames_dir:
+        os.makedirs(frames_dir, exist_ok=True)
+    frames = extract_frames(video_path, dest, max_frames=max_frames)
     if not frames:
         raise VisionUnavailable("No frames could be extracted from the video.")
     analysis = analyse_frames(frames, api_key=api_key)
-    return {"url": label, "n_frames": len(frames), "analysis": analysis}
+    return {"url": label, "n_frames": len(frames), "analysis": analysis,
+            "frames": [os.path.basename(f) for f in frames],
+            "seconds_per_frame": FRAME_INTERVAL_S}
 
 
-def analyse_video(url: str, api_key: Optional[str] = None, max_frames: int = 8) -> dict:
+def analyse_video(url: str, api_key: Optional[str] = None, max_frames: int = 8,
+                  frames_dir: Optional[str] = None) -> dict:
     """Download a video by URL, then frames -> Claude vision."""
     work = tempfile.mkdtemp(prefix="drivevision_")
     try:
         video = download_video(url, work)
-        return _frames_and_analyse(video, work, api_key, max_frames, url)
+        return _frames_and_analyse(video, work, api_key, max_frames, url, frames_dir=frames_dir)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
 def analyse_video_file(video_path: str, api_key: Optional[str] = None,
-                       max_frames: int = 8, label: Optional[str] = None) -> dict:
+                       max_frames: int = 8, label: Optional[str] = None,
+                       frames_dir: Optional[str] = None) -> dict:
     """Analyse a local/uploaded/recorded video file (no download step)."""
     work = tempfile.mkdtemp(prefix="drivevision_")
     try:
         return _frames_and_analyse(video_path, work, api_key, max_frames,
-                                   label or os.path.basename(video_path))
+                                   label or os.path.basename(video_path), frames_dir=frames_dir)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -205,13 +215,23 @@ def analyse_video_file(video_path: str, api_key: Optional[str] = None,
 _SEV_COLOUR = {"good": "#30a46c", "note": "#f5a623", "concern": "#e5484d"}
 
 
+def _mmss(sec: float) -> str:
+    sec = int(round(sec))
+    return f"{sec // 60:02d}:{sec % 60:02d}"
+
+
 def build_vision_report_html(result: dict, title: str = "AI drive analysis",
-                             video_url: Optional[str] = None) -> str:
+                             video_url: Optional[str] = None,
+                             frames_link: Optional[str] = None) -> str:
     a = result.get("analysis", {})
     findings = a.get("findings", [])
     player = (f'<video src="{html.escape(video_url)}" controls playsinline '
-              f'style="width:100%;border-radius:12px;margin-bottom:16px;background:#000"></video>'
+              f'style="width:100%;border-radius:12px;margin-bottom:14px;background:#000"></video>'
               if video_url else "")
+    frames_btn = (
+        f'<a href="{html.escape(frames_link)}" style="display:inline-block;margin:0 0 16px;'
+        f'color:#0091ff;font-size:13px;font-weight:600;text-decoration:none">🖼 View frame-by-frame →</a>'
+        if frames_link else "")
     rows = "".join(
         f"<tr><td class='mono'>#{f.get('frame','')}</td>"
         f"<td><span class='dot' style='background:{_SEV_COLOUR.get(f.get('severity'),'#888')}'></span>"
@@ -238,8 +258,65 @@ def build_vision_report_html(result: dict, title: str = "AI drive analysis",
  <h1>{html.escape(title)}</h1>
  <div class="muted">{result.get('n_frames','?')} frames analysed by {MODEL}</div>
  {player}
+ {frames_btn}
  <div class="overall"><strong>Overall:</strong> {html.escape(str(a.get('overall','')))}</div>
  <table><thead><tr><th>Frame</th><th>Type</th><th>Instructor note</th></tr></thead>
  <tbody>{rows}</tbody></table>
  <p class="muted">AI-assisted practice feedback from video, not a substitute for a qualified instructor.</p>
+</div></body></html>"""
+
+
+def build_frames_page_html(entry: dict, frame_base: str, back_link: Optional[str] = None) -> str:
+    """A timeline page: each sampled frame shown with the AI's note for it."""
+    frames = entry.get("frames", [])
+    a = entry.get("analysis", {})
+    spf = float(entry.get("seconds_per_frame", FRAME_INTERVAL_S))
+    label = entry.get("label", "")
+
+    by_frame: dict = {}
+    for f in a.get("findings", []):
+        by_frame.setdefault(int(f.get("frame", 0) or 0), []).append(f)
+
+    cards = []
+    for i, name in enumerate(frames):
+        fnum = i + 1
+        notes = by_frame.get(fnum, [])
+        if notes:
+            body = "".join(
+                f'<div class="note"><span class="dot" style="background:{_SEV_COLOUR.get(n.get("severity"), "#888")}"></span>'
+                f'<span class="cat">{html.escape(str(n.get("category", "")).replace("_", " "))}</span>'
+                f'<span class="obs">{html.escape(str(n.get("observation", "")))}</span></div>'
+                for n in notes)
+        else:
+            body = '<div class="note muted">No notable events in this frame.</div>'
+        cards.append(
+            f'<div class="frame"><img src="{html.escape(frame_base)}/{html.escape(name)}" loading="lazy" alt="frame {fnum}">'
+            f'<div class="side"><div class="t">{_mmss(i * spf)} <span class="fn">· frame {fnum}/{len(frames)}</span></div>'
+            f'{body}</div></div>')
+    cards_html = "".join(cards) or '<div class="muted">No frames stored for this clip.</div>'
+    back = f'<a href="{html.escape(back_link)}">← back</a> · ' if back_link else ""
+
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Frame-by-frame — {html.escape(str(label))}</title>
+<style>
+ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:0;background:#f4f5f7;color:#11181c}}
+ .wrap{{max-width:760px;margin:0 auto;padding:28px 20px 60px}}
+ h1{{font-size:22px;margin:0 0 4px}} .muted{{color:#687076;font-size:13px}}
+ .overall{{background:#fff;border:1px solid #e6e8eb;border-radius:12px;padding:14px 16px;margin:14px 0 18px}}
+ .frame{{display:flex;gap:14px;background:#fff;border:1px solid #e6e8eb;border-radius:14px;padding:12px;margin-bottom:14px}}
+ .frame img{{width:260px;max-width:42%;border-radius:10px;object-fit:cover;background:#000}}
+ .side{{flex:1;min-width:0}}
+ .t{{font-variant-numeric:tabular-nums;font-weight:700;font-size:14px;margin-bottom:8px}}
+ .fn{{color:#889;font-weight:500}}
+ .note{{font-size:13px;line-height:1.5;margin-bottom:8px}}
+ .dot{{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:7px;vertical-align:middle}}
+ .cat{{display:inline-block;font-size:11px;text-transform:capitalize;color:#687076;margin-right:6px}}
+ .obs{{display:block;margin-top:2px}}
+ a{{color:#0091ff;text-decoration:none}}
+ @media(max-width:540px){{.frame{{flex-direction:column}}.frame img{{width:100%;max-width:100%}}}}
+</style></head><body><div class="wrap">
+ <h1>🖼 Frame-by-frame</h1>
+ <div class="muted">{back}{len(frames)} frames from “{html.escape(str(label))}”, sampled every {spf:g}s · {MODEL}</div>
+ <div class="overall"><strong>Overall:</strong> {html.escape(str(a.get('overall', '')))}</div>
+ {cards_html}
 </div></body></html>"""

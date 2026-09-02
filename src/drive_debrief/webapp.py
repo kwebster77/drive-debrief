@@ -34,6 +34,7 @@ from .vision import (
     VisionUnavailable,
     analyse_video,
     analyse_video_file,
+    build_frames_page_html,
     build_vision_report_html,
 )
 
@@ -95,15 +96,16 @@ def _load_videos() -> list:
         return []
 
 
-def _store_video(data: bytes, suffix: str, label: str, result: dict) -> dict:
+def _store_video(data: bytes, suffix: str, label: str, result: dict, vid: str) -> dict:
     """Persist an uploaded/recorded video + its analysis; return the index entry."""
-    vid = uuid.uuid4().hex[:12]
     filename = vid + (suffix or ".webm")
     with open(os.path.join(MEDIA_DIR, filename), "wb") as fh:
         fh.write(data)
     entry = {"id": vid, "label": label, "created": _now_iso(),
              "filename": filename, "n_frames": result.get("n_frames", 0),
-             "analysis": result.get("analysis", {})}
+             "analysis": result.get("analysis", {}),
+             "frames": result.get("frames", []),
+             "seconds_per_frame": result.get("seconds_per_frame", 4.0)}
     videos = _load_videos()
     videos.append(entry)
     with open(VIDEOS_INDEX, "w", encoding="utf-8") as fh:
@@ -270,13 +272,15 @@ async def _analyse_video_upload(video: UploadFile, t0: float) -> HTMLResponse:
     with tempfile.NamedTemporaryFile("wb", suffix=suffix, delete=False) as tmp:
         tmp.write(data)
         path = tmp.name
+    vid = uuid.uuid4().hex[:12]
+    frames_dir = os.path.join(MEDIA_DIR, f"{vid}_frames")
     try:
-        result = analyse_video_file(path, label=video.filename)
-        entry = _store_video(data, suffix, video.filename or "recording", result)
+        result = analyse_video_file(path, label=video.filename, frames_dir=frames_dir)
+        entry = _store_video(data, suffix, video.filename or "recording", result, vid)
         log.info("Video-file ok: %d frames in %.2fs -> /video/%s",
                  result.get("n_frames", 0), time.time() - t0, entry["id"])
         return HTMLResponse(build_vision_report_html(
-            result, video_url=f"/media/{entry['filename']}"))
+            result, video_url=f"/media/{entry['filename']}", frames_link=f"/frames/{vid}"))
     except VisionUnavailable as exc:
         log.warning("Video-file unavailable: %s", exc)
         return _error_page("Video analysis unavailable", str(exc))
@@ -416,15 +420,35 @@ def media(name: str):
     return FileResponse(path)
 
 
+@app.get("/frame/{vid}/{name}")
+def frame(vid: str, name: str):
+    """Serve one stored frame image for the timeline page."""
+    path = os.path.join(MEDIA_DIR, f"{os.path.basename(vid)}_frames", os.path.basename(name))
+    if not os.path.exists(path):
+        return _error_page("Not found", "That frame is no longer available.")
+    return FileResponse(path)
+
+
+@app.get("/frames/{vid}", response_class=HTMLResponse)
+def frames_page(vid: str) -> HTMLResponse:
+    entry = next((v for v in _load_videos() if v.get("id") == vid), None)
+    if entry is None:
+        return _error_page("Not found", "No stored video with that id.")
+    return HTMLResponse(build_frames_page_html(
+        entry, frame_base=f"/frame/{vid}", back_link=f"/video/{vid}"))
+
+
 @app.get("/video/{vid}", response_class=HTMLResponse)
 def video(vid: str) -> HTMLResponse:
     entry = next((v for v in _load_videos() if v.get("id") == vid), None)
     if entry is None:
         return _error_page("Not found", "No stored video with that id.")
+    has_frames = bool(entry.get("frames"))
     return HTMLResponse(build_vision_report_html(
         {"n_frames": entry.get("n_frames", 0), "analysis": entry.get("analysis", {})},
         title=f"AI drive analysis — {entry.get('label', vid)}",
         video_url=f"/media/{entry['filename']}",
+        frames_link=f"/frames/{vid}" if has_frames else None,
     ))
 
 
@@ -435,9 +459,10 @@ def videos() -> HTMLResponse:
         f"<tr><td><a href='/video/{v['id']}'>{html.escape(str(v.get('label','')))}</a></td>"
         f"<td class='mono'>{html.escape(str(v.get('created','')))}</td>"
         f"<td class='mono'>{v.get('n_frames','')} frames</td>"
+        f"<td><a href='/frames/{v['id']}'>frame-by-frame</a></td>"
         f"<td><a href='/media/{v['filename']}'>play</a></td></tr>"
         for v in items
-    ) or "<tr><td colspan='4' class='empty'>No videos stored yet.</td></tr>"
+    ) or "<tr><td colspan='5' class='empty'>No videos stored yet.</td></tr>"
     return HTMLResponse(
         "<!DOCTYPE html><html><head><meta charset='utf-8'><title>stored videos</title>"
         "<style>body{font-family:-apple-system,sans-serif;background:#f4f5f7;color:#11181c;margin:0}"
@@ -447,7 +472,7 @@ def videos() -> HTMLResponse:
         "th{background:#fafbfc;color:#687076}.mono{font-variant-numeric:tabular-nums}"
         ".empty{text-align:center;color:#687076;padding:20px}a{color:#0091ff}</style></head>"
         "<body><div class='wrap'><h1>Stored videos</h1><p><a href='/'>← back</a></p>"
-        "<table><thead><tr><th>Drive</th><th>When</th><th>Frames</th><th></th></tr></thead>"
+        "<table><thead><tr><th>Drive</th><th>When</th><th>Frames</th><th></th><th></th></tr></thead>"
         f"<tbody>{rows}</tbody></table></div></body></html>"
     )
 
