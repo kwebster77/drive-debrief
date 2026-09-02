@@ -1,18 +1,22 @@
 # 🚗 drive-debrief
 
 **Record a practice drive → get a coaching debrief.** Point it at a GPS log
-of a learner drive and it produces a clean HTML report: a route map, a
-smoothness score, and a timestamped list of every harsh brake, harsh
-acceleration, hard corner and hesitation — with a plain-English coaching
-note for each.
+of a learner drive and it produces a clean HTML report: a route map coloured
+by smoothness, a speed-vs-time chart, a **DVSA-style mock-test verdict**, and
+a timestamped list of every harsh brake, harsh acceleration, hard corner and
+hesitation — with a plain-English coaching note for each. Save each drive to
+see your **progress over time**.
 
 ```
 Score 87/100 (grade B)  ·  0.43 km  ·  4 event(s) flagged
+Mock test: Likely pass  ·  3 driving / 0 serious / 0 dangerous
   00:22  Harsh braking        0.51g   [moderate]
   00:23  Stop                 7.0s    [minor]
   00:33  Harsh acceleration   0.35g   [minor]
   00:38  Hard cornering       0.38g   [minor]
 ```
+
+Accepts **CSV or GPX** (phyphox, SensorLog, Strava, dashcams, most GPS apps).
 
 ## Why this needed to be built (and isn't a prompt)
 
@@ -65,15 +69,30 @@ Record a drive with a free phone sensor logger and export CSV:
 - **Android** — [phyphox](https://phyphox.org/) → *Location (GPS)* experiment
 - **iOS** — [SensorLog](https://apps.apple.com/app/sensorlog/id388014573)
 
-Then:
+Then (CSV or GPX both work):
 
 ```bash
 drive-debrief my_drive.csv -o my_debrief.html
+drive-debrief my_ride.gpx        # e.g. a Strava / dashcam export
 ```
 
 The loader is forgiving about headers — it recognises phyphox and SensorLog
-column names automatically. The only required fields are **time, latitude,
-longitude**; **speed** and **course** are used if present (recommended).
+column names automatically, and parses any GPX dialect. The only required
+fields are **time, latitude, longitude**; **speed** and **course** are used
+if present (recommended — they make cornering/braking detection more robust).
+
+## Track your progress
+
+Save each drive, then render the trend:
+
+```bash
+drive-debrief drive1.csv --save --label "Week 1"
+drive-debrief drive2.csv --save --label "Week 2"
+drive-debrief-progress -o progress.html      # score + harsh-events/km over time
+```
+
+Progress is stored in a plain JSON file (`drive_history.json`) — no database,
+no network.
 
 Canonical CSV, if you're generating your own:
 
@@ -95,30 +114,41 @@ t,lat,lon,speed,course
 
 Thresholds are tunable: `drive-debrief drive.csv --brake-g 0.3 --lateral-g 0.3`.
 
+Each event is also mapped to the DVSA fault model — **driving fault** (minor),
+**serious fault**, **dangerous fault** — to produce a mock "would this pass?"
+verdict (16+ driving faults, or any serious/dangerous fault, is a fail). It's
+practice guidance, not an official result.
+
 ## CLI
 
 ```
-drive-debrief INPUT.csv [-o OUT.html] [--json] [--no-html]
-                        [--brake-g G] [--accel-g G] [--lateral-g G]
+drive-debrief INPUT[.csv|.gpx] [-o OUT.html] [--json] [--no-html]
+                               [--save] [--history PATH] [--label NAME]
+                               [--brake-g G] [--accel-g G] [--lateral-g G]
+
+drive-debrief-progress [-H history.json] [-o progress.html]
 ```
 
 `--json` prints a machine-readable summary to **stdout** (human summary goes
-to stderr, so it pipes cleanly).
+to stderr, so it pipes cleanly). `--save` appends the drive to the history.
 
 ## How it's organised
 
 ```
 src/drive_debrief/
-  io.py          load + normalise CSV (phyphox / SensorLog aware)
+  io.py          load CSV/GPX + normalise (phyphox / SensorLog / Strava aware)
   geo.py         haversine / bearing (scalar + vectorised)
   kinematics.py  speed, heading, longitudinal & lateral g  ← the robust core
   events.py      threshold + duration + merge event detection
+  assessment.py  map events → DVSA driving/serious/dangerous faults + verdict
   scoring.py     smoothness score & summary
-  report.py      self-contained HTML + inline SVG map (no network)
-  pipeline.py    CSV in → report + summary out
-  cli.py         command line
+  report.py      self-contained HTML: smoothness heatmap, speed chart, faults
+  history.py     persist each drive to JSON
+  progress.py    render score / events-per-km trends across drives
+  pipeline.py    drive in → report + summary out
+  cli.py         `drive-debrief`  ·  progress_cli.py  `drive-debrief-progress`
   synth.py       synthetic drive with *known* events (demo + test ground truth)
-tests/           unit tests (maths, detectors, noise-robustness)
+tests/           25 unit tests (maths, detectors, faults, history, CSV/GPX)
 Dockerfile       CPU-only image for a cloud sandbox
 ```
 
@@ -137,7 +167,7 @@ run with realistic GPS jitter to prove noise-robustness.
 - Speed-limit overlay (OSM `maxspeed`) → speeding detection
 - Optional vision garnish: run a small model on dashcam frames to catch
   red-light stops, fused with the speed trace
-- Trend across multiple drives (is the learner improving?)
+- Roundabout / manoeuvre detection from GPS geometry
 
 ---
 

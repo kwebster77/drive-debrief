@@ -24,7 +24,7 @@ def _default_out(csv_path: str) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="drive-debrief", description="Turn a recorded practice drive into a coaching debrief.")
-    p.add_argument("input", help="CSV of the drive (t, lat, lon, [speed]); phyphox/SensorLog exports accepted")
+    p.add_argument("input", help="drive as CSV or GPX (t, lat, lon, [speed], [course]); phyphox/SensorLog/Strava exports accepted")
     p.add_argument("-o", "--out", help="output HTML path (default: <input>.debrief.html)")
     p.add_argument("--title", default="Practice-drive debrief", help="report title")
     p.add_argument("--json", action="store_true", help="print the summary as JSON to stdout")

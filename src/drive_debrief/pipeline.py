@@ -8,7 +8,7 @@ import pandas as pd
 
 from .assessment import assess
 from .events import Event, Thresholds, detect_events
-from .io import load_track_csv, normalise_dataframe
+from .io import load_track, normalise_dataframe
 from .kinematics import build_track
 from .report import build_report_html
 from .scoring import Summary, summarise
@@ -34,7 +34,7 @@ def run_debrief(
     title: str = "Practice-drive debrief",
 ) -> dict:
     """Load a CSV, analyse it, write the HTML report, return a summary dict."""
-    df = load_track_csv(csv_path)
+    df = load_track(csv_path)
     track, events, summary = analyse_dataframe(df, thresholds)
     assessment = assess(events)
 

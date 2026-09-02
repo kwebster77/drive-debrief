@@ -13,6 +13,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from drive_debrief.synth import generate_drive  # noqa: E402
+from drive_debrief.io import to_gpx  # noqa: E402
 
 
 def main() -> int:
@@ -20,6 +21,7 @@ def main() -> int:
     p.add_argument("-o", "--out", default="sample_data/sample_drive.csv")
     p.add_argument("--clean", action="store_true", help="no GPS noise (deterministic)")
     p.add_argument("--noise", type=float, default=3.0, help="GPS jitter in metres")
+    p.add_argument("--no-gpx", action="store_true", help="don't also write a .gpx sample")
     args = p.parse_args()
 
     noise = 0.0 if args.clean else args.noise
@@ -31,6 +33,12 @@ def main() -> int:
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     df.to_csv(args.out, index=False)
     print(f"Wrote {len(df)} samples -> {args.out} (noise={noise} m)")
+
+    if not args.no_gpx:
+        gpx_path = os.path.splitext(args.out)[0] + ".gpx"
+        with open(gpx_path, "w", encoding="utf-8") as fh:
+            fh.write(to_gpx(df))
+        print(f"Wrote GPX sample     -> {gpx_path}")
     return 0
 
 
