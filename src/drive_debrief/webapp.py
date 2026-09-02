@@ -114,24 +114,47 @@ def _store_video(data: bytes, suffix: str, label: str, result: dict) -> dict:
 HOME = f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>drive-debrief</title>
 <style>
- body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;margin:0;background:#0b0d12;color:#e6e8eb}}
- .wrap{{max-width:720px;margin:0 auto;padding:48px 20px 60px}}
- h1{{font-size:28px;margin:0 0 6px}} .sub{{color:#9aa4b2;margin-bottom:28px}}
- .card{{background:#151922;border:1px solid #232936;border-radius:16px;padding:22px;margin-bottom:18px}}
- .card h2{{font-size:16px;margin:0 0 4px}} .card p{{color:#9aa4b2;font-size:13px;margin:0 0 14px}}
- input[type=file],input[type=text]{{width:100%;box-sizing:border-box;padding:11px 12px;border-radius:10px;
-   border:1px solid #2b3342;background:#0f131a;color:#e6e8eb;font-size:14px;margin-bottom:12px}}
- button{{background:#0091ff;color:#fff;border:0;border-radius:10px;padding:11px 18px;font-size:14px;font-weight:600;cursor:pointer}}
- button:hover{{background:#0a84e0}}
- .tag{{display:inline-block;font-size:11px;color:#0091ff;border:1px solid #22405e;background:#0e1b2a;border-radius:999px;padding:2px 9px;margin-bottom:10px}}
- code{{background:#0f131a;padding:1px 6px;border-radius:5px;font-size:12px}}
- .foot{{color:#5b6572;font-size:12px;margin-top:20px}}
+ :root{{--bg:#0a0c11;--card:#141a25;--card2:#0f131c;--line:#222b3a;--ink:#e9edf4;--dim:#93a0b4;--accent:#37b0ff;--accent2:#22d3a8}}
+ *{{box-sizing:border-box}}
+ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;margin:0;color:var(--ink);min-height:100vh;
+      background:radial-gradient(1100px 560px at 50% -12%,rgba(55,176,255,.16),transparent 62%),var(--bg)}}
+ .wrap{{max-width:680px;margin:0 auto;padding:34px 20px 72px}}
+ .topbar{{display:flex;justify-content:flex-end;gap:18px;font-size:13px;margin-bottom:22px}}
+ .topbar a{{color:var(--dim);text-decoration:none}} .topbar a:hover{{color:var(--accent)}}
+ .hero h1{{font-size:34px;line-height:1.08;letter-spacing:-.6px;margin:0 0 10px;
+          background:linear-gradient(92deg,#ffffff,#a6dbff);-webkit-background-clip:text;background-clip:text;color:transparent}}
+ .hero p{{color:var(--dim);font-size:15px;line-height:1.5;margin:0 0 26px;max-width:46ch}}
+ .card{{background:linear-gradient(180deg,var(--card),var(--card2));border:1px solid var(--line);border-radius:18px;
+       padding:22px 22px 20px;margin-bottom:16px;box-shadow:inset 0 1px 0 rgba(255,255,255,.03),0 12px 34px rgba(0,0,0,.28);
+       transition:transform .16s ease,border-color .16s ease}}
+ .card:hover{{transform:translateY(-2px);border-color:#2f3b50}}
+ .card h2{{font-size:17px;margin:8px 0 4px}} .card p{{color:var(--dim);font-size:13px;line-height:1.55;margin:0 0 14px}}
+ input[type=file],input[type=text]{{width:100%;padding:12px 13px;border-radius:11px;border:1px solid #2a3444;
+   background:#0b0f17;color:var(--ink);font-size:14px;margin-bottom:12px;outline:none;transition:border-color .15s,box-shadow .15s}}
+ input[type=text]:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(55,176,255,.18)}}
+ input[type=file]::file-selector-button{{background:#1b2431;color:var(--ink);border:0;border-radius:8px;padding:7px 12px;margin-right:10px;cursor:pointer}}
+ button{{background:linear-gradient(180deg,var(--accent),#1f8fe6);color:#fff;border:0;border-radius:11px;
+       padding:11px 18px;font-size:14px;font-weight:600;cursor:pointer;transition:filter .15s,transform .05s}}
+ button:hover{{filter:brightness(1.08)}} button:active{{transform:translateY(1px)}}
+ #recBtn{{background:#1b2431;border:1px solid #2e3a4e;filter:none}}
+ .tag{{display:inline-flex;align-items:center;font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;
+      color:var(--accent);border:1px solid #234055;background:rgba(55,176,255,.08);border-radius:999px;padding:3px 10px;margin-bottom:10px}}
+ .tag.g{{color:var(--accent2);border-color:#1f5045;background:rgba(34,211,168,.08)}}
+ .tag.p{{color:#c99bff;border-color:#453163;background:rgba(160,110,255,.1)}}
+ code{{background:#0b0f17;border:1px solid #222a38;padding:2px 7px;border-radius:6px;font-size:12px;color:#bcd6ff}}
+ .foot{{color:#5b6572;font-size:12px;margin-top:26px;text-align:center;line-height:2}}
+ .foot a{{text-decoration:none}}
 </style></head><body><div class="wrap">
- <h1>🚗 drive-debrief</h1>
- <div class="sub">Turn a practice drive into a coaching debrief. Share your GPS data <em>or</em> a video.</div>
+ <div class="topbar">
+   <a href="/progress">Progress</a><a href="/videos">Videos</a><a href="/logs">Logs</a>
+ </div>
+ <div class="hero">
+   <h1>🚗 drive-debrief</h1>
+   <p>Turn a practice drive into a coaching debrief — share your GPS data, or a dashcam video for an AI review.</p>
+ </div>
 
  <div class="card">
-   <div class="tag">GPS · deterministic</div>
+   <div class="tag g">GPS · deterministic</div>
    <h2>Upload your driver data</h2>
    <p><code>.csv</code>, <code>.gpx</code>, <code>.kml/.kmz</code>, or a <strong>Google Takeout</strong>
       location <code>.json</code> (phyphox / SensorLog / Strava / Google Timeline all work as-is).
@@ -162,7 +185,7 @@ HOME = f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  </div>
 
  <div class="card">
-   <div class="tag">Phone · auto-upload</div>
+   <div class="tag p">Phone · auto-upload</div>
    <h2>Stream live from SensorLog (iOS)</h2>
    <p>In SensorLog, turn on <strong>HTTP</strong> upload and set the target URL to
       <code id="ingestUrl">…/ingest?session=myphone</code>. Log your drive, then open the trip:</p>
