@@ -13,7 +13,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from drive_debrief.synth import generate_drive  # noqa: E402
-from drive_debrief.io import to_gpx  # noqa: E402
+from drive_debrief.io import to_gpx, to_kml, to_google_records  # noqa: E402
 
 
 def main() -> int:
@@ -35,10 +35,15 @@ def main() -> int:
     print(f"Wrote {len(df)} samples -> {args.out} (noise={noise} m)")
 
     if not args.no_gpx:
-        gpx_path = os.path.splitext(args.out)[0] + ".gpx"
-        with open(gpx_path, "w", encoding="utf-8") as fh:
-            fh.write(to_gpx(df))
-        print(f"Wrote GPX sample     -> {gpx_path}")
+        stem = os.path.splitext(args.out)[0]
+        for ext, text in (
+            (".gpx", to_gpx(df)),
+            (".kml", to_kml(df)),
+            (".google.json", to_google_records(df)),
+        ):
+            with open(stem + ext, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            print(f"Wrote sample         -> {stem + ext}")
     return 0
 
 

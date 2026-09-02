@@ -77,7 +77,7 @@ def _win(seconds: float, dt: float) -> int:
 def build_track(
     df: pd.DataFrame,
     speed_smooth_s: float = 2.0,
-    heading_smooth_s: float = 3.0,
+    heading_smooth_s: float = 3.5,
     accel_smooth_s: float = 2.0,
     yaw_speed_gate_mps: float = 2.5,
 ) -> Track:
@@ -106,8 +106,13 @@ def build_track(
         heading_raw = df["course"].to_numpy(dtype=float)
         heading = _rolling_mean(heading_raw, _win(1.0, dt_med))
     else:
-        heading_raw = headings_deg(lat, lon)
-        heading = _rolling_mean(heading_raw, _win(heading_smooth_s, dt_med))
+        # No device course (e.g. KML / bare GPS): a 3 m position wobble fakes a
+        # sharp turn at speed, so smooth *position* before taking bearings.
+        win = _win(heading_smooth_s, dt_med)
+        lat_s = _rolling_mean(lat, win)
+        lon_s = _rolling_mean(lon, win)
+        heading_raw = headings_deg(lat_s, lon_s)
+        heading = _rolling_mean(heading_raw, win)
 
     a_long = _rolling_mean(np.gradient(speed, t), _win(accel_smooth_s, dt_med))
 

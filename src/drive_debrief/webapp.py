@@ -48,10 +48,11 @@ HOME = f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  <div class="card">
    <div class="tag">GPS · deterministic</div>
    <h2>Upload your driver data</h2>
-   <p>A <code>.csv</code> or <code>.gpx</code> of the drive (time, lat, lon, and speed/course if you have them —
-      phyphox / SensorLog / Strava exports work as-is).</p>
+   <p><code>.csv</code>, <code>.gpx</code>, <code>.kml/.kmz</code>, or a <strong>Google Takeout</strong>
+      location <code>.json</code> (phyphox / SensorLog / Strava / Google Timeline all work as-is).
+      Google exports are multi-trip histories — we analyse your longest drive.</p>
    <form action="/analyze" method="post" enctype="multipart/form-data">
-     <input type="file" name="file" accept=".csv,.gpx" required>
+     <input type="file" name="file" accept=".csv,.gpx,.kml,.kmz,.json" required>
      <button type="submit">Analyse drive →</button>
    </form>
  </div>

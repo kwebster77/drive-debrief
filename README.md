@@ -98,6 +98,26 @@ column names automatically, and parses any GPX dialect. The only required
 fields are **time, latitude, longitude**; **speed** and **course** are used
 if present (recommended — they make cornering/braking detection more robust).
 
+### Google Maps / Timeline data
+
+Google has **no public API** for Location History, so "connecting" means
+exporting your own data and uploading it. Supported:
+
+- **Google Takeout** → *Location History* → `Records.json` (raw) or the
+  Semantic Location History monthly JSON files
+- **Timeline** on-device export (`Timeline.json` / `semanticSegments`)
+- **KML / KMZ** (a Timeline day export or My Maps)
+
+```bash
+drive-debrief Records.json          # or a .kml / .kmz
+```
+
+These exports are usually multi-trip *histories*, so drive-debrief extracts
+the driving segments and analyses your **longest single drive**. Position-only
+sources (KML, raw history without Google's speed/heading) get reliable
+braking / stop / route analysis; cornering is treated **conservatively**
+(better to miss a bend than invent a fault).
+
 ## Track your progress
 
 Save each drive, then render the trend:
@@ -153,7 +173,7 @@ to stderr, so it pipes cleanly). `--save` appends the drive to the history.
 
 ```
 src/drive_debrief/
-  io.py          load CSV/GPX + normalise (phyphox / SensorLog / Strava aware)
+  io.py          load CSV/GPX/KML/Google-Takeout + normalise (phyphox/SensorLog/Strava/Google)
   geo.py         haversine / bearing (scalar + vectorised)
   kinematics.py  speed, heading, longitudinal & lateral g  ← the robust core
   events.py      threshold + duration + merge event detection
@@ -165,7 +185,7 @@ src/drive_debrief/
   pipeline.py    drive in → report + summary out
   cli.py         `drive-debrief`  ·  progress_cli.py  `drive-debrief-progress`
   synth.py       synthetic drive with *known* events (demo + test ground truth)
-tests/           25 unit tests (maths, detectors, faults, history, CSV/GPX)
+tests/           31 unit tests (maths, detectors, faults, history, CSV/GPX/KML/Google)
 Dockerfile       CPU-only image for a cloud sandbox
 ```
 
