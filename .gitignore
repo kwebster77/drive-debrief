@@ -9,3 +9,5 @@ out/
 *.debrief.html
 .pytest_cache/
 .DS_Store
+drive_history.json
+progress.html

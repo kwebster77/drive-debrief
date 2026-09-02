@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import sys
 
 from .events import Thresholds
+from .history import DEFAULT_HISTORY, append_run, build_entry
 from .pipeline import run_debrief
 
 
@@ -27,6 +29,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--title", default="Practice-drive debrief", help="report title")
     p.add_argument("--json", action="store_true", help="print the summary as JSON to stdout")
     p.add_argument("--no-html", action="store_true", help="skip writing HTML (use with --json)")
+    p.add_argument("--save", action="store_true", help="append this drive to the progress history")
+    p.add_argument("--history", default=DEFAULT_HISTORY, help="history JSON path (with --save)")
+    p.add_argument("--label", help="name for this drive in the history (default: file name)")
     p.add_argument("--brake-g", type=float, default=Thresholds.brake_g)
     p.add_argument("--accel-g", type=float, default=Thresholds.accel_g)
     p.add_argument("--lateral-g", type=float, default=Thresholds.lateral_g)
@@ -64,6 +69,13 @@ def main(argv=None) -> int:
         mm = int(e["t_peak"] // 60)
         ss = int(e["t_peak"] % 60)
         print(f"  {mm:02d}:{ss:02d}  {e['label']:<20} {e['peak_value']}{e['unit']:<3} [{e['severity']}]", file=human)
+    if args.save:
+        label = args.label or os.path.splitext(os.path.basename(args.input))[0]
+        stamp = datetime.datetime.now().isoformat(timespec="seconds")
+        entry = build_entry(label, stamp, result)
+        history = append_run(entry, args.history)
+        print(f"Saved '{label}' to {args.history} ({len(history)} drive(s) tracked)", file=human)
+
     if result["report_path"]:
         print(f"\nReport: {result['report_path']}", file=human)
     if args.json:
