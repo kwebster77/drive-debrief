@@ -23,6 +23,10 @@ progress: sample  ## save 3 drives + render the trend -> out/progress.html
 	$(PY) -m drive_debrief sample_data/sample_drive.csv --no-html --save --history out/demo_history.json --label "Week 3"
 	$(PY) -m drive_debrief.progress_cli -H out/demo_history.json -o out/progress.html
 
+web:              ## serve the web app on :8000 (upload CSV/GPX or paste a video link)
+	$(PY) -m pip install -q -e ".[web]"
+	$(PY) -m drive_debrief.webapp
+
 test:             ## run the unit tests
 	$(PY) -m pytest -q
 

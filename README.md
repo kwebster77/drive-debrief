@@ -62,6 +62,23 @@ make docker-run     # report lands in ./out/debrief.html
 
 Then open `out/debrief.html`.
 
+## Web app — upload your data or a video
+
+A one-page UI on **port 8000** (maps straight onto a cloud-sandbox preview, e.g. Sparkles):
+
+```bash
+make web          # or: docker build -t drive-debrief . && docker run -p 8000:8000 drive-debrief
+```
+
+- **Upload GPS driver data** (`.csv` / `.gpx`) → the deterministic telematics debrief.
+- **Paste a dashcam/YouTube link** → frames are sampled and read by **Claude vision**
+  (`claude-opus-4-8`) for traffic context: lights, lane position, following distance, hazards.
+
+The video path needs `ffmpeg` + `yt-dlp` (both in the Docker image) and an
+**`ANTHROPIC_API_KEY`**. In Sparkles, add the key as a **synced secret** — model keys
+are kept out of the sandbox by default. Without it, the GPS path still works and the
+video path shows a clear "set your key" message rather than failing.
+
 ## Use your own drive
 
 Record a drive with a free phone sensor logger and export CSV:
