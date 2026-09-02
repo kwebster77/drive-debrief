@@ -133,17 +133,33 @@ def analyse_frames(frame_paths: List[str], api_key: Optional[str] = None) -> dic
     except ImportError as exc:  # pragma: no cover
         raise VisionUnavailable("The 'anthropic' package is not installed.") from exc
 
-    client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+    # Identity-linked keys must name the workspace via a header.
+    workspace = os.getenv("ANTHROPIC_WORKSPACE_ID")
+    headers = {"anthropic-workspace-id": workspace} if workspace else None
+    kwargs = {"default_headers": headers} if headers else {}
+    client = (anthropic.Anthropic(api_key=api_key, **kwargs) if api_key
+              else anthropic.Anthropic(**kwargs))
+
     content: List[dict] = [_image_block(p) for p in frame_paths]
     content.append({"type": "text", "text": _PROMPT})
 
-    log.info("Sending %d frames to %s", len(frame_paths), MODEL)
-    resp = client.messages.create(
-        model=MODEL,
-        max_tokens=2000,
-        messages=[{"role": "user", "content": content}],
-        output_config={"format": {"type": "json_schema", "schema": _FRAME_SCHEMA}},
-    )
+    log.info("Sending %d frames to %s (workspace=%s)", len(frame_paths), MODEL, bool(workspace))
+    try:
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=2000,
+            messages=[{"role": "user", "content": content}],
+            output_config={"format": {"type": "json_schema", "schema": _FRAME_SCHEMA}},
+        )
+    except Exception as exc:  # surface the actionable cause
+        msg = str(exc)
+        if "workspace" in msg.lower():
+            raise VisionUnavailable(
+                "This API key is identity-linked and needs a workspace id. Set "
+                "ANTHROPIC_WORKSPACE_ID, or create a workspace-scoped key in the Console."
+            ) from exc
+        log.warning("Claude API error: %s", msg)
+        raise VisionUnavailable(f"Claude API error: {msg}") from exc
     # A safety decline comes back as HTTP 200 with stop_reason "refusal".
     if resp.stop_reason == "refusal":
         cat = getattr(getattr(resp, "stop_details", None), "category", None)

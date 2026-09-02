@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse
 
 from .assessment import assess
 from .events import Thresholds
-from .io import load_sensorlog_records, load_track
+from .io import load_sensorlog_records, load_track, parse_ingest_text
 from .pipeline import analyse_dataframe
 from .report import build_report_html
 from .vision import (
@@ -275,19 +275,19 @@ async def ingest(request: Request, session: str = "default", file: UploadFile = 
         log.info("ingest[%s]: file %s -> %d samples", session, file.filename, len(df))
         return {"received": len(df), "total": len(_TRIPS[session]), "report": f"/trip/{session}"}
 
-    # Streamed JSON rows (SensorLog): accumulate.
-    try:
-        body = await request.json()
-    except Exception:
-        return {"error": "expected a file upload or a JSON body of SensorLog rows"}
-    if isinstance(body, list):
-        rows = body
-    elif isinstance(body, dict):
-        rows = body.get("data") or body.get("rows") or [body]
-    else:
-        rows = []
+    # Streamed body (SensorLog HTTP): tolerate JSON / NDJSON / CSV.
+    raw = await request.body()
+    ctype = request.headers.get("content-type", "")
+    rows = parse_ingest_text(raw.decode("utf-8", "replace"))
     _TRIPS.setdefault(session, []).extend(rows)
-    log.info("ingest[%s]: +%d rows (total %d)", session, len(rows), len(_TRIPS[session]))
+    log.info("ingest[%s]: ctype=%s bytes=%d -> +%d rows (total %d)",
+             session, ctype[:40] or "?", len(raw), len(rows), len(_TRIPS[session]))
+    if not rows:
+        # Show the caller a hint + a sample of what we received (for debugging).
+        sample = raw[:200].decode("utf-8", "replace")
+        return {"received": 0, "total": len(_TRIPS.get(session, [])),
+                "note": "couldn't parse any rows from this body", "content_type": ctype,
+                "sample": sample}
     return {"received": len(rows), "total": len(_TRIPS[session]), "report": f"/trip/{session}"}
 
 

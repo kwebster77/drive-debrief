@@ -18,6 +18,8 @@ import os
 import xml.etree.ElementTree as ET
 import zipfile
 
+from io import StringIO
+
 import numpy as np
 import pandas as pd
 
@@ -91,6 +93,46 @@ def load_sensorlog_records(records, source: str = "sensorlog") -> pd.DataFrame:
     if not records:
         raise ValueError(f"{source}: no records to parse")
     return _canonical_from_raw(pd.DataFrame(list(records)), source)
+
+
+def parse_ingest_text(text: str):
+    """Best-effort parse of an auto-uploaded body into a list of row dicts.
+
+    Handles a JSON array/object, newline-delimited JSON, or CSV — because
+    phone loggers stream data in whichever of those they feel like.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    # Whole-body JSON.
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            return [d for d in data if isinstance(d, dict)]
+        if isinstance(data, dict):
+            for k in ("data", "rows", "samples", "records"):
+                if isinstance(data.get(k), list):
+                    return [d for d in data[k] if isinstance(d, dict)]
+            return [data]
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # Newline-delimited JSON objects.
+    nd = []
+    for line in (ln.strip() for ln in text.splitlines() if ln.strip()):
+        try:
+            d = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            nd = None
+            break
+        if isinstance(d, dict):
+            nd.append(d)
+    if nd:
+        return nd
+    # CSV.
+    try:
+        return pd.read_csv(StringIO(text)).to_dict("records")
+    except Exception:
+        return []
 
 
 def _finalise(df: pd.DataFrame, source: str) -> pd.DataFrame:
