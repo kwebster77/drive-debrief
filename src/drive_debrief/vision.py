@@ -205,9 +205,13 @@ def analyse_video_file(video_path: str, api_key: Optional[str] = None,
 _SEV_COLOUR = {"good": "#30a46c", "note": "#f5a623", "concern": "#e5484d"}
 
 
-def build_vision_report_html(result: dict, title: str = "AI drive analysis") -> str:
+def build_vision_report_html(result: dict, title: str = "AI drive analysis",
+                             video_url: Optional[str] = None) -> str:
     a = result.get("analysis", {})
     findings = a.get("findings", [])
+    player = (f'<video src="{html.escape(video_url)}" controls playsinline '
+              f'style="width:100%;border-radius:12px;margin-bottom:16px;background:#000"></video>'
+              if video_url else "")
     rows = "".join(
         f"<tr><td class='mono'>#{f.get('frame','')}</td>"
         f"<td><span class='dot' style='background:{_SEV_COLOUR.get(f.get('severity'),'#888')}'></span>"
@@ -232,7 +236,8 @@ def build_vision_report_html(result: dict, title: str = "AI drive analysis") -> 
  a{{color:#0091ff}}
 </style></head><body><div class="wrap">
  <h1>{html.escape(title)}</h1>
- <div class="muted">{result.get('n_frames','?')} frames analysed by {MODEL} · <a href="{html.escape(result.get('url',''))}">source video</a></div>
+ <div class="muted">{result.get('n_frames','?')} frames analysed by {MODEL}</div>
+ {player}
  <div class="overall"><strong>Overall:</strong> {html.escape(str(a.get('overall','')))}</div>
  <table><thead><tr><th>Frame</th><th>Type</th><th>Instructor note</th></tr></thead>
  <tbody>{rows}</tbody></table>

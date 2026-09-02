@@ -8,19 +8,26 @@ Runs on 0.0.0.0:8000 so it maps straight onto a Sparkles preview.
 from __future__ import annotations
 
 import collections
+import datetime
 import html
+import json
 import logging
 import os
 import tempfile
 import time
+import uuid
+from dataclasses import asdict
+from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from .assessment import assess
 from .events import Thresholds
+from .history import append_run, build_entry, load_history
 from .io import load_sensorlog_records, load_track, parse_ingest_text
 from .pipeline import analyse_dataframe
+from .progress import build_progress_html
 from .report import build_report_html
 from .vision import (
     MODEL,
@@ -29,6 +36,13 @@ from .vision import (
     analyse_video_file,
     build_vision_report_html,
 )
+
+# Persistent data (survives restarts): progress history + stored videos.
+DATA_DIR = os.getenv("DRIVE_DEBRIEF_DATA", "data")
+MEDIA_DIR = os.path.join(DATA_DIR, "media")
+HISTORY_PATH = os.path.join(DATA_DIR, "history.json")
+VIDEOS_INDEX = os.path.join(DATA_DIR, "videos.json")
+os.makedirs(MEDIA_DIR, exist_ok=True)
 
 app = FastAPI(title="drive-debrief")
 
@@ -53,6 +67,49 @@ EXAMPLE_VIDEO = "https://www.youtube.com/watch?v=zBteu7mmQ3s"
 
 # Accumulated SensorLog samples keyed by session id (phone auto-upload).
 _TRIPS: dict = {}
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def _save_history(label: str, summary, assessment) -> None:
+    """Append a completed drive to the progress history."""
+    result = {"summary": asdict(summary), "assessment": asdict(assessment)}
+    try:
+        entry = build_entry(label, _now_iso(), result)
+        append_run(entry, HISTORY_PATH)
+        log.info("history: saved '%s' (%d/%s)", label, summary.score, summary.grade)
+    except Exception:
+        log.exception("history: failed to save '%s'", label)
+
+
+def _load_videos() -> list:
+    if not os.path.exists(VIDEOS_INDEX):
+        return []
+    try:
+        with open(VIDEOS_INDEX, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _store_video(data: bytes, suffix: str, label: str, result: dict) -> dict:
+    """Persist an uploaded/recorded video + its analysis; return the index entry."""
+    vid = uuid.uuid4().hex[:12]
+    filename = vid + (suffix or ".webm")
+    with open(os.path.join(MEDIA_DIR, filename), "wb") as fh:
+        fh.write(data)
+    entry = {"id": vid, "label": label, "created": _now_iso(),
+             "filename": filename, "n_frames": result.get("n_frames", 0),
+             "analysis": result.get("analysis", {})}
+    videos = _load_videos()
+    videos.append(entry)
+    with open(VIDEOS_INDEX, "w", encoding="utf-8") as fh:
+        json.dump(videos, fh, indent=2)
+    log.info("video: stored %s (%s, %d bytes)", vid, label, len(data))
+    return entry
 
 HOME = f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>drive-debrief</title>
@@ -115,7 +172,9 @@ HOME = f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
    </form>
  </div>
 
- <div class="foot">Practice feedback, not a substitute for a qualified instructor. ·
+ <div class="foot">Practice feedback, not a substitute for a qualified instructor.<br>
+   <a href="/progress" style="color:#0091ff">progress</a> ·
+   <a href="/videos" style="color:#0091ff">stored videos</a> ·
    <a href="/logs" style="color:#5b6572">activity log</a></div>
 
  <script>
@@ -190,8 +249,11 @@ async def _analyse_video_upload(video: UploadFile, t0: float) -> HTMLResponse:
         path = tmp.name
     try:
         result = analyse_video_file(path, label=video.filename)
-        log.info("Video-file ok: %d frames in %.2fs", result.get("n_frames", 0), time.time() - t0)
-        return HTMLResponse(build_vision_report_html(result))
+        entry = _store_video(data, suffix, video.filename or "recording", result)
+        log.info("Video-file ok: %d frames in %.2fs -> /video/%s",
+                 result.get("n_frames", 0), time.time() - t0, entry["id"])
+        return HTMLResponse(build_vision_report_html(
+            result, video_url=f"/media/{entry['filename']}"))
     except VisionUnavailable as exc:
         log.warning("Video-file unavailable: %s", exc)
         return _error_page("Video analysis unavailable", str(exc))
@@ -224,6 +286,7 @@ async def analyze(file: UploadFile = File(None), video: UploadFile = File(None),
             assessment = assess(events)
             report = build_report_html(track, events, summary, assessment,
                                        title=f"Debrief — {file.filename}")
+            _save_history(file.filename, summary, assessment)
             log.info("GPS ok: %s -> %d/%s, %d events, '%s' in %.2fs",
                      file.filename, summary.score, summary.grade, len(events),
                      assessment.verdict, time.time() - t0)
@@ -252,33 +315,35 @@ async def analyze(file: UploadFile = File(None), video: UploadFile = File(None),
     return _error_page("Nothing to analyse", "Upload a CSV/GPX/KML/JSON file or paste a video link.")
 
 
+@app.get("/ingest")
+async def ingest_get(request: Request, session: str = "default") -> dict:
+    """SensorLog GET mode: each sample's fields arrive as query params."""
+    row = {k: v for k, v in request.query_params.items() if k != "session"}
+    if not row:
+        return {"received": 0, "note": "GET with no data params — enable sensors incl. Location"}
+    _TRIPS.setdefault(session, []).append(row)
+    n = len(_TRIPS[session])
+    if n <= 3 or n % 50 == 0:
+        log.info("ingest[%s] GET: 1 row (total %d) keys=%s", session, n, list(row)[:6])
+    return {"received": 1, "total": n, "report": f"/trip/{session}"}
+
+
 @app.post("/ingest")
-async def ingest(request: Request, session: str = "default", file: UploadFile = File(None)) -> dict:
-    """Receive data auto-uploaded from a phone (SensorLog HTTP mode).
+async def ingest(request: Request, session: str = "default") -> dict:
+    """Receive streamed samples auto-uploaded from a phone (SensorLog HTTP POST).
 
-    Accepts either a one-shot file upload (any supported format) or a stream
-    of SensorLog JSON rows, accumulated per ``session``. Open ``/trip/<session>``
-    to see the debrief for whatever has arrived so far.
+    Accepts JSON (array/object), newline-JSON, CSV, or form-url-encoded bodies,
+    accumulated per ``session``. Open ``/trip/<session>`` for the debrief.
+    (For one-shot files, use the upload form on the home page.)
     """
-    # One-shot file upload: parse straight away and expose the samples.
-    if file is not None and file.filename:
-        suffix = os.path.splitext(file.filename)[1].lower() or ".csv"
-        data = await file.read()
-        with tempfile.NamedTemporaryFile("wb", suffix=suffix, delete=False) as tmp:
-            tmp.write(data)
-            path = tmp.name
-        try:
-            df = load_track(path)
-        finally:
-            os.unlink(path)
-        _TRIPS[session] = df.to_dict("records")
-        log.info("ingest[%s]: file %s -> %d samples", session, file.filename, len(df))
-        return {"received": len(df), "total": len(_TRIPS[session]), "report": f"/trip/{session}"}
-
-    # Streamed body (SensorLog HTTP): tolerate JSON / NDJSON / CSV.
+    # Streamed body (SensorLog HTTP): tolerate JSON / NDJSON / CSV / form-url.
     raw = await request.body()
     ctype = request.headers.get("content-type", "")
-    rows = parse_ingest_text(raw.decode("utf-8", "replace"))
+    if "x-www-form-urlencoded" in ctype:
+        row = {k: v for k, v in parse_qsl(raw.decode("utf-8", "replace")) if k != "session"}
+        rows = [row] if row else []
+    else:
+        rows = parse_ingest_text(raw.decode("utf-8", "replace"))
     _TRIPS.setdefault(session, []).extend(rows)
     log.info("ingest[%s]: ctype=%s bytes=%d -> +%d rows (total %d)",
              session, ctype[:40] or "?", len(raw), len(rows), len(_TRIPS[session]))
@@ -304,11 +369,64 @@ def trip(session: str) -> HTMLResponse:
         df = load_sensorlog_records(records, f"session:{session}")
         track, events, summary = analyse_dataframe(df, Thresholds())
         assessment = assess(events)
+        _save_history(f"trip: {session}", summary, assessment)
         log.info("trip[%s]: %d samples -> %d/%s", session, len(records), summary.score, summary.grade)
         return HTMLResponse(build_report_html(track, events, summary, assessment,
                                               title=f"Live trip — {session}"))
     except ValueError as exc:
         return _error_page("Couldn't analyse this trip yet", str(exc))
+
+
+@app.get("/progress", response_class=HTMLResponse)
+def progress() -> HTMLResponse:
+    entries = load_history(HISTORY_PATH)
+    return HTMLResponse(build_progress_html(entries, title="Your driving progress"))
+
+
+@app.get("/media/{name}")
+def media(name: str):
+    """Serve a stored video file."""
+    safe = os.path.basename(name)
+    path = os.path.join(MEDIA_DIR, safe)
+    if not os.path.exists(path):
+        return _error_page("Not found", "That video is no longer available.")
+    return FileResponse(path)
+
+
+@app.get("/video/{vid}", response_class=HTMLResponse)
+def video(vid: str) -> HTMLResponse:
+    entry = next((v for v in _load_videos() if v.get("id") == vid), None)
+    if entry is None:
+        return _error_page("Not found", "No stored video with that id.")
+    return HTMLResponse(build_vision_report_html(
+        {"n_frames": entry.get("n_frames", 0), "analysis": entry.get("analysis", {})},
+        title=f"AI drive analysis — {entry.get('label', vid)}",
+        video_url=f"/media/{entry['filename']}",
+    ))
+
+
+@app.get("/videos", response_class=HTMLResponse)
+def videos() -> HTMLResponse:
+    items = list(reversed(_load_videos()))
+    rows = "".join(
+        f"<tr><td><a href='/video/{v['id']}'>{html.escape(str(v.get('label','')))}</a></td>"
+        f"<td class='mono'>{html.escape(str(v.get('created','')))}</td>"
+        f"<td class='mono'>{v.get('n_frames','')} frames</td>"
+        f"<td><a href='/media/{v['filename']}'>play</a></td></tr>"
+        for v in items
+    ) or "<tr><td colspan='4' class='empty'>No videos stored yet.</td></tr>"
+    return HTMLResponse(
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>stored videos</title>"
+        "<style>body{font-family:-apple-system,sans-serif;background:#f4f5f7;color:#11181c;margin:0}"
+        ".wrap{max-width:760px;margin:0 auto;padding:28px 20px}h1{font-size:22px}"
+        "table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e6e8eb;border-radius:12px;overflow:hidden}"
+        "th,td{text-align:left;padding:10px 12px;font-size:13px;border-bottom:1px solid #eef0f2}"
+        "th{background:#fafbfc;color:#687076}.mono{font-variant-numeric:tabular-nums}"
+        ".empty{text-align:center;color:#687076;padding:20px}a{color:#0091ff}</style></head>"
+        "<body><div class='wrap'><h1>Stored videos</h1><p><a href='/'>← back</a></p>"
+        "<table><thead><tr><th>Drive</th><th>When</th><th>Frames</th><th></th></tr></thead>"
+        f"<tbody>{rows}</tbody></table></div></body></html>"
+    )
 
 
 def main() -> None:
