@@ -79,6 +79,17 @@ The video path needs `ffmpeg` + `yt-dlp` (both in the Docker image) and an
 are kept out of the sandbox by default. Without it, the GPS path still works and the
 video path shows a clear "set your key" message rather than failing.
 
+**Video** can be a link, an uploaded clip, **or recorded in-browser** from the phone
+camera (bypasses YouTube's cloud-IP download blocks entirely).
+
+**Phone auto-upload (SensorLog, iOS).** Point SensorLog's **HTTP** upload at
+`<app-url>/ingest?session=myphone`, log your drive, then open `<app-url>/trip/myphone`
+for the debrief. `/ingest` accepts either the streamed SensorLog JSON rows or a one-shot
+file upload. ⚠️ Your phone needs a **publicly reachable** URL — the Sparkles preview is
+auth-gated, so use a tunnel (e.g. `ngrok http 8000`) or a public deploy for the phone path.
+
+A live `/logs` page (linked from the footer) shows each request and its outcome.
+
 ## Use your own drive
 
 Record a drive with a free phone sensor logger and export CSV:

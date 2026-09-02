@@ -14,17 +14,21 @@ import os
 import tempfile
 import time
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse
 
 from .assessment import assess
 from .events import Thresholds
-from .io import load_track
-from .kinematics import build_track
+from .io import load_sensorlog_records, load_track
 from .pipeline import analyse_dataframe
 from .report import build_report_html
-from .scoring import summarise
-from .vision import VisionUnavailable, analyse_video, build_vision_report_html
+from .vision import (
+    MODEL,
+    VisionUnavailable,
+    analyse_video,
+    analyse_video_file,
+    build_vision_report_html,
+)
 
 app = FastAPI(title="drive-debrief")
 
@@ -46,6 +50,9 @@ log.addHandler(_ring_handler)
 log.setLevel(logging.INFO)
 
 EXAMPLE_VIDEO = "https://www.youtube.com/watch?v=zBteu7mmQ3s"
+
+# Accumulated SensorLog samples keyed by session id (phone auto-upload).
+_TRIPS: dict = {}
 
 HOME = f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>drive-debrief</title>
@@ -79,18 +86,64 @@ HOME = f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  </div>
 
  <div class="card">
-   <div class="tag">Video · AI vision</div>
+   <div class="tag">Video · AI vision ({MODEL})</div>
    <h2>Analyse a dashcam video</h2>
-   <p>Paste a YouTube/dashcam link. Frames are sampled and read by Claude for traffic
-      context — lights, lane position, following distance, hazards.</p>
+   <p>Paste a link, upload a clip, or record now with your phone camera. Frames are read
+      by Claude for traffic context — lights, lane position, following distance, hazards.</p>
    <form action="/analyze" method="post" enctype="multipart/form-data">
-     <input type="text" name="url" value="{EXAMPLE_VIDEO}" placeholder="https://...">
-     <button type="submit">Analyse video →</button>
+     <input type="text" name="url" value="{EXAMPLE_VIDEO}" placeholder="https://... (YouTube/dashcam)">
+     <button type="submit">Analyse link →</button>
+   </form>
+   <form action="/analyze" method="post" enctype="multipart/form-data" style="margin-top:12px">
+     <input type="file" name="video" accept="video/*" capture="environment" required>
+     <button type="submit">Analyse uploaded clip →</button>
+   </form>
+   <div style="margin-top:12px">
+     <button id="recBtn" type="button">● Record from camera</button>
+     <span id="recStatus" style="color:#9aa4b2;font-size:12px;margin-left:8px"></span>
+   </div>
+ </div>
+
+ <div class="card">
+   <div class="tag">Phone · auto-upload</div>
+   <h2>Stream live from SensorLog (iOS)</h2>
+   <p>In SensorLog, turn on <strong>HTTP</strong> upload and set the target URL to
+      <code id="ingestUrl">…/ingest?session=myphone</code>. Log your drive, then open the trip:</p>
+   <form onsubmit="location.href='/trip/'+(this.session.value||'myphone');return false;">
+     <input type="text" name="session" value="myphone" placeholder="session name">
+     <button type="submit">Open my live trip →</button>
    </form>
  </div>
 
  <div class="foot">Practice feedback, not a substitute for a qualified instructor. ·
    <a href="/logs" style="color:#5b6572">activity log</a></div>
+
+ <script>
+   var _iu = document.getElementById('ingestUrl');
+   if (_iu) _iu.textContent = location.origin + '/ingest?session=myphone';
+   (function() {{
+     var btn = document.getElementById('recBtn'), st = document.getElementById('recStatus');
+     var rec, chunks = [], stream;
+     if (!navigator.mediaDevices || !window.MediaRecorder) {{ btn.disabled = true; st.textContent = 'recording not supported here'; return; }}
+     btn.onclick = async function() {{
+       if (rec && rec.state === 'recording') {{ rec.stop(); return; }}
+       try {{ stream = await navigator.mediaDevices.getUserMedia({{ video: {{ facingMode: 'environment' }}, audio: false }}); }}
+       catch (e) {{ st.textContent = 'camera blocked: ' + e.message; return; }}
+       chunks = []; rec = new MediaRecorder(stream);
+       rec.ondataavailable = function(e) {{ if (e.data.size) chunks.push(e.data); }};
+       rec.onstop = async function() {{
+         stream.getTracks().forEach(function(t) {{ t.stop(); }});
+         st.textContent = 'uploading & analysing…';
+         var fd = new FormData();
+         fd.append('video', new Blob(chunks, {{ type: 'video/webm' }}), 'recording.webm');
+         var r = await fetch('/analyze', {{ method: 'POST', body: fd }});
+         document.open(); document.write(await r.text()); document.close();
+       }};
+       rec.start(); btn.textContent = '■ Stop & analyse';
+       st.textContent = 'recording… mount your phone and drive safely';
+     }};
+   }})();
+ </script>
 </div></body></html>"""
 
 
@@ -128,9 +181,34 @@ def logs() -> HTMLResponse:
     )
 
 
+async def _analyse_video_upload(video: UploadFile, t0: float) -> HTMLResponse:
+    suffix = os.path.splitext(video.filename)[1].lower() or ".webm"
+    data = await video.read()
+    log.info("Video upload: %s (%d bytes)", video.filename, len(data))
+    with tempfile.NamedTemporaryFile("wb", suffix=suffix, delete=False) as tmp:
+        tmp.write(data)
+        path = tmp.name
+    try:
+        result = analyse_video_file(path, label=video.filename)
+        log.info("Video-file ok: %d frames in %.2fs", result.get("n_frames", 0), time.time() - t0)
+        return HTMLResponse(build_vision_report_html(result))
+    except VisionUnavailable as exc:
+        log.warning("Video-file unavailable: %s", exc)
+        return _error_page("Video analysis unavailable", str(exc))
+    except Exception as exc:
+        log.exception("Video-file failed after %.2fs", time.time() - t0)
+        return _error_page("Video analysis failed", f"{type(exc).__name__}: {exc}")
+    finally:
+        os.unlink(path)
+
+
 @app.post("/analyze", response_class=HTMLResponse)
-async def analyze(file: UploadFile = File(None), url: str = Form(None)) -> HTMLResponse:
+async def analyze(file: UploadFile = File(None), video: UploadFile = File(None),
+                  url: str = Form(None)) -> HTMLResponse:
     t0 = time.time()
+
+    if video is not None and video.filename:
+        return await _analyse_video_upload(video, t0)
 
     # GPS path — an uploaded file takes priority.
     if file is not None and file.filename:
@@ -172,6 +250,65 @@ async def analyze(file: UploadFile = File(None), url: str = Form(None)) -> HTMLR
 
     log.info("Empty request")
     return _error_page("Nothing to analyse", "Upload a CSV/GPX/KML/JSON file or paste a video link.")
+
+
+@app.post("/ingest")
+async def ingest(request: Request, session: str = "default", file: UploadFile = File(None)) -> dict:
+    """Receive data auto-uploaded from a phone (SensorLog HTTP mode).
+
+    Accepts either a one-shot file upload (any supported format) or a stream
+    of SensorLog JSON rows, accumulated per ``session``. Open ``/trip/<session>``
+    to see the debrief for whatever has arrived so far.
+    """
+    # One-shot file upload: parse straight away and expose the samples.
+    if file is not None and file.filename:
+        suffix = os.path.splitext(file.filename)[1].lower() or ".csv"
+        data = await file.read()
+        with tempfile.NamedTemporaryFile("wb", suffix=suffix, delete=False) as tmp:
+            tmp.write(data)
+            path = tmp.name
+        try:
+            df = load_track(path)
+        finally:
+            os.unlink(path)
+        _TRIPS[session] = df.to_dict("records")
+        log.info("ingest[%s]: file %s -> %d samples", session, file.filename, len(df))
+        return {"received": len(df), "total": len(_TRIPS[session]), "report": f"/trip/{session}"}
+
+    # Streamed JSON rows (SensorLog): accumulate.
+    try:
+        body = await request.json()
+    except Exception:
+        return {"error": "expected a file upload or a JSON body of SensorLog rows"}
+    if isinstance(body, list):
+        rows = body
+    elif isinstance(body, dict):
+        rows = body.get("data") or body.get("rows") or [body]
+    else:
+        rows = []
+    _TRIPS.setdefault(session, []).extend(rows)
+    log.info("ingest[%s]: +%d rows (total %d)", session, len(rows), len(_TRIPS[session]))
+    return {"received": len(rows), "total": len(_TRIPS[session]), "report": f"/trip/{session}"}
+
+
+@app.get("/trip/{session}", response_class=HTMLResponse)
+def trip(session: str) -> HTMLResponse:
+    records = _TRIPS.get(session) or []
+    if not records:
+        return _error_page(
+            "No data yet",
+            f"No samples received for session '{session}'. Point SensorLog's HTTP "
+            "upload at /ingest?session=" + session + " and start logging.",
+        )
+    try:
+        df = load_sensorlog_records(records, f"session:{session}")
+        track, events, summary = analyse_dataframe(df, Thresholds())
+        assessment = assess(events)
+        log.info("trip[%s]: %d samples -> %d/%s", session, len(records), summary.score, summary.grade)
+        return HTMLResponse(build_report_html(track, events, summary, assessment,
+                                              title=f"Live trip — {session}"))
+    except ValueError as exc:
+        return _error_page("Couldn't analyse this trip yet", str(exc))
 
 
 def main() -> None:

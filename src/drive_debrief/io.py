@@ -27,14 +27,18 @@ from .geo import segment_distances_m
 # Candidate source column names -> canonical name. Matching is done on a
 # lowercased, stripped version of the header so units/casing don't matter.
 _ALIASES = {
-    "t": ["t", "time (s)", "time", "seconds_elapsed", "locationtimestamp_since1970(s)"],
-    "lat": ["lat", "latitude", "latitude (deg)", "latitude (°)", "locationlatitude(wgs84)"],
-    "lon": ["lon", "lng", "longitude", "longitude (deg)", "longitude (°)", "locationlongitude(wgs84)"],
-    "speed": ["speed", "speed_mps", "velocity (m/s)", "velocity", "locationspeed(m/s)"],
+    "t": ["t", "time (s)", "time", "seconds_elapsed",
+          "locationtimestamp_since1970(s)", "locationtimestamp_since1970", "loggingtime(txt)"],
+    "lat": ["lat", "latitude", "latitude (deg)", "latitude (°)",
+            "locationlatitude(wgs84)", "locationlatitude"],
+    "lon": ["lon", "lng", "longitude", "longitude (deg)", "longitude (°)",
+            "locationlongitude(wgs84)", "locationlongitude"],
+    "speed": ["speed", "speed_mps", "velocity (m/s)", "velocity",
+              "locationspeed(m/s)", "locationspeed"],
     "course": [
         "course", "heading", "bearing", "direction",
         "direction (deg)", "direction (°)",
-        "locationcourse(°)", "locationcourse", "locationtrueheading(°)",
+        "locationcourse(°)", "locationcourse", "locationtrueheading(°)", "locationtrueheading",
     ],
 }
 
@@ -50,37 +54,43 @@ def _resolve(columns) -> dict:
     return resolved
 
 
-def load_track_csv(path: str) -> pd.DataFrame:
-    """Read ``path`` and return a canonical DataFrame sorted by time.
-
-    Raises ValueError with an actionable message if required columns are
-    missing, so a bad export fails loudly instead of silently mis-parsing.
-    """
-    raw = pd.read_csv(path)
+def _canonical_from_raw(raw: pd.DataFrame, source: str) -> pd.DataFrame:
+    """Resolve aliased columns from any tabular source into canonical form."""
     resolved = _resolve(raw.columns)
-
     missing = [c for c in ("t", "lat", "lon") if c not in resolved]
     if missing:
         raise ValueError(
-            f"{path}: could not find columns {missing}. "
+            f"{source}: could not find columns {missing}. "
             f"Saw headers: {list(raw.columns)}"
         )
-
-    df = pd.DataFrame(
-        {
-            "t": pd.to_numeric(raw[resolved["t"]], errors="coerce"),
-            "lat": pd.to_numeric(raw[resolved["lat"]], errors="coerce"),
-            "lon": pd.to_numeric(raw[resolved["lon"]], errors="coerce"),
-        }
-    )
+    df = pd.DataFrame({
+        "t": pd.to_numeric(raw[resolved["t"]], errors="coerce"),
+        "lat": pd.to_numeric(raw[resolved["lat"]], errors="coerce"),
+        "lon": pd.to_numeric(raw[resolved["lon"]], errors="coerce"),
+    })
     if "speed" in resolved:
         df["speed"] = pd.to_numeric(raw[resolved["speed"]], errors="coerce")
     if "course" in resolved:
-        # Course is often NaN while stationary; fill so it stays usable.
         course = pd.to_numeric(raw[resolved["course"]], errors="coerce")
         df["course"] = course.ffill().bfill()
+    return _finalise(df, source)
 
-    return _finalise(df, path)
+
+def load_track_csv(path: str) -> pd.DataFrame:
+    """Read a CSV (our schema or a phyphox / SensorLog export) into canonical form."""
+    return _canonical_from_raw(pd.read_csv(path), path)
+
+
+def load_sensorlog_records(records, source: str = "sensorlog") -> pd.DataFrame:
+    """Parse SensorLog JSON (a list of per-sample dicts) into canonical form.
+
+    SensorLog's HTTP streaming/upload sends JSON rows with keys like
+    ``locationLatitude`` / ``locationSpeed`` / ``locationCourse`` — the same
+    fields as its CSV, so the alias resolver handles them.
+    """
+    if not records:
+        raise ValueError(f"{source}: no records to parse")
+    return _canonical_from_raw(pd.DataFrame(list(records)), source)
 
 
 def _finalise(df: pd.DataFrame, source: str) -> pd.DataFrame:
@@ -169,7 +179,7 @@ def load_track(path: str) -> pd.DataFrame:
     if ext in (".kml", ".kmz"):
         return load_kml(path)
     if ext == ".json":
-        return load_google_json(path)
+        return load_json(path)
     return load_track_csv(path)
 
 
@@ -366,6 +376,21 @@ def load_google_json(path: str) -> pd.DataFrame:
         f"{path}: unrecognised Google location JSON "
         "(expected 'locations', 'timelineObjects', or 'semanticSegments')."
     )
+
+
+def load_json(path: str) -> pd.DataFrame:
+    """Dispatch a .json file to the Google or SensorLog parser by shape."""
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if isinstance(data, dict) and any(k in data for k in ("locations", "timelineObjects", "semanticSegments")):
+        return load_google_json(path)
+    if isinstance(data, list):
+        return load_sensorlog_records(data, path)
+    if isinstance(data, dict):
+        for key in ("data", "rows", "samples", "records"):
+            if isinstance(data.get(key), list):
+                return load_sensorlog_records(data[key], path)
+    raise ValueError(f"{path}: unrecognised JSON (not a Google export or a SensorLog log)")
 
 
 def _read_kml_text(path: str) -> str:

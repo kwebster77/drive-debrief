@@ -157,17 +157,31 @@ def analyse_frames(frame_paths: List[str], api_key: Optional[str] = None) -> dic
     return json.loads(text)
 
 
-def analyse_video(url: str, api_key: Optional[str] = None,
-                  max_frames: int = 8) -> dict:
-    """Full path: download -> frames -> Claude vision. Returns analysis + meta."""
+def _frames_and_analyse(video_path: str, work: str, api_key, max_frames: int, label: str) -> dict:
+    frames = extract_frames(video_path, work, max_frames=max_frames)
+    if not frames:
+        raise VisionUnavailable("No frames could be extracted from the video.")
+    analysis = analyse_frames(frames, api_key=api_key)
+    return {"url": label, "n_frames": len(frames), "analysis": analysis}
+
+
+def analyse_video(url: str, api_key: Optional[str] = None, max_frames: int = 8) -> dict:
+    """Download a video by URL, then frames -> Claude vision."""
     work = tempfile.mkdtemp(prefix="drivevision_")
     try:
         video = download_video(url, work)
-        frames = extract_frames(video, work, max_frames=max_frames)
-        if not frames:
-            raise VisionUnavailable("No frames could be extracted from the video.")
-        analysis = analyse_frames(frames, api_key=api_key)
-        return {"url": url, "n_frames": len(frames), "analysis": analysis}
+        return _frames_and_analyse(video, work, api_key, max_frames, url)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def analyse_video_file(video_path: str, api_key: Optional[str] = None,
+                       max_frames: int = 8, label: Optional[str] = None) -> dict:
+    """Analyse a local/uploaded/recorded video file (no download step)."""
+    work = tempfile.mkdtemp(prefix="drivevision_")
+    try:
+        return _frames_and_analyse(video_path, work, api_key, max_frames,
+                                   label or os.path.basename(video_path))
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
