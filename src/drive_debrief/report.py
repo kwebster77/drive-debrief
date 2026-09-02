@@ -13,7 +13,7 @@ import numpy as np
 
 from .assessment import Assessment
 from .events import Event
-from .kinematics import Track
+from .kinematics import G, Track
 from .scoring import Summary
 
 _COLOURS = {
@@ -52,9 +52,81 @@ def _nearest_index(track: Track, t: float) -> int:
     return int(np.argmin(np.abs(track.t - t)))
 
 
+def _lerp(a: float, b: float, t: float) -> float:
+    return a + (b - a) * t
+
+
+def _roughness_colour(g: float) -> str:
+    """Green (smooth) → amber → red (rough) by combined g-force."""
+    g = max(0.0, min(g, 0.45))
+    t = g / 0.45
+    green, amber, red = (48, 164, 108), (245, 166, 35), (229, 72, 77)
+    if t < 0.5:
+        u = t / 0.5
+        c = [_lerp(green[i], amber[i], u) for i in range(3)]
+    else:
+        u = (t - 0.5) / 0.5
+        c = [_lerp(amber[i], red[i], u) for i in range(3)]
+    return f"rgb({int(c[0])},{int(c[1])},{int(c[2])})"
+
+
+def _heatmap_segments(track: Track, px: np.ndarray, py: np.ndarray) -> str:
+    """Colour each route segment by how rough the driving was there."""
+    rough = np.sqrt(track.a_long ** 2 + track.a_lat ** 2) / G
+    segs = []
+    for i in range(len(px) - 1):
+        col = _roughness_colour(float(max(rough[i], rough[i + 1])))
+        segs.append(
+            f'<line x1="{px[i]:.1f}" y1="{py[i]:.1f}" x2="{px[i+1]:.1f}" y2="{py[i+1]:.1f}" '
+            f'stroke="{col}" stroke-width="4" stroke-linecap="round"/>'
+        )
+    return "".join(segs)
+
+
+def _svg_speed(track: Track, events: List[Event], width: int = 720, height: int = 190) -> str:
+    """Speed-over-time line with dashed markers at each flagged event."""
+    pad_l, pad_r, pad_t, pad_b = 40, 16, 16, 24
+    t = track.t
+    mph = track.speed * 2.23694
+    tmin, tmax = float(t[0]), float(t[-1])
+    tspan = (tmax - tmin) or 1.0
+    vmax = max(float(np.max(mph)) if len(mph) else 1.0, 1.0) * 1.15
+
+    def X(tt):
+        return pad_l + (tt - tmin) / tspan * (width - pad_l - pad_r)
+
+    def Y(v):
+        return height - pad_b - (v / vmax) * (height - pad_t - pad_b)
+
+    pts = " ".join(f"{X(tt):.1f},{Y(v):.1f}" for tt, v in zip(t, mph))
+    marks = []
+    for e in events:
+        if e.kind == "stop":
+            continue
+        col = _COLOURS.get(e.kind, "#888")
+        x = X(e.t_peak)
+        marks.append(
+            f'<line x1="{x:.1f}" y1="{pad_t}" x2="{x:.1f}" y2="{height - pad_b}" stroke="{col}" '
+            f'stroke-width="1.5" stroke-dasharray="3,3" opacity="0.75"/>'
+            f'<circle cx="{x:.1f}" cy="{pad_t}" r="3.5" fill="{col}">'
+            f"<title>{html.escape(e.label)} @ {_mmss(e.t_peak)}</title></circle>"
+        )
+    mid = int(vmax * 0.87)
+    return f"""<svg viewBox="0 0 {width} {height}" width="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Speed over time">
+  <line x1="{pad_l}" y1="{height - pad_b}" x2="{width - pad_r}" y2="{height - pad_b}" stroke="#e6e8eb"/>
+  <text x="{pad_l - 6}" y="{Y(0):.1f}" text-anchor="end" font-size="10" fill="#889">0</text>
+  <text x="{pad_l - 6}" y="{Y(mid):.1f}" text-anchor="end" font-size="10" fill="#889">{mid}</text>
+  <text x="6" y="{pad_t + 4}" font-size="10" fill="#889">mph</text>
+  <polyline points="{pts}" fill="none" stroke="#0091ff" stroke-width="2"/>
+  {''.join(marks)}
+  <text x="{width - pad_r}" y="{height - 6}" text-anchor="end" font-size="10" fill="#889">time (s) →</text>
+</svg>"""
+
+
 def _svg_map(track: Track, events: List[Event], width: int = 720, height: int = 420) -> str:
     px, py = _project(track, width, height, pad=28)
     pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in zip(px, py))
+    segments = _heatmap_segments(track, px, py)
 
     markers = []
     for e in events:
@@ -72,8 +144,8 @@ def _svg_map(track: Track, events: List[Event], width: int = 720, height: int = 
     ex, ey = px[-1], py[-1]
     return f"""<svg viewBox="0 0 {width} {height}" width="100%" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Route map">
   <rect x="0" y="0" width="{width}" height="{height}" rx="14" fill="#0b0d12"/>
-  <polyline points="{pts}" fill="none" stroke="#3b4252" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline points="{pts}" fill="none" stroke="#5b6b8c" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="{pts}" fill="none" stroke="#0b0d12" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  {segments}
   <circle cx="{sx:.1f}" cy="{sy:.1f}" r="6" fill="#30a46c" stroke="white" stroke-width="2"><title>Start</title></circle>
   <circle cx="{ex:.1f}" cy="{ey:.1f}" r="6" fill="#111" stroke="white" stroke-width="2"><title>End</title></circle>
   {''.join(markers)}
@@ -179,6 +251,9 @@ def build_report_html(track: Track, events: List[Event], summary: Summary,
   .legend {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }}
   .chip {{ font-size: 12px; color: #333; display: inline-flex; align-items: center; }}
   .dot {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }}
+  .grad {{ width: 26px; height: 10px; border-radius: 3px; display: inline-block; margin-right: 6px;
+           background: linear-gradient(90deg, rgb(48,164,108), rgb(245,166,35), rgb(229,72,77)); }}
+  .chartlabel {{ font-size: 12px; color: #687076; margin: 2px 4px 8px; }}
   h2 {{ font-size: 16px; margin: 26px 0 10px; }}
   table {{ width: 100%; border-collapse: collapse; background: white; border: 1px solid #e6e8eb; border-radius: 12px; overflow: hidden; }}
   th, td {{ text-align: left; padding: 10px 12px; font-size: 13px; border-bottom: 1px solid #eef0f2; vertical-align: top; }}
@@ -213,7 +288,15 @@ def build_report_html(track: Track, events: List[Event], summary: Summary,
 
   <div class="mapwrap">
     {_svg_map(track, events)}
-    <div class="legend">{_legend(events) or '<span class="chip">No events flagged</span>'}</div>
+    <div class="legend">
+      <span class="chip"><span class="grad"></span>route colour = smoothness (green → red)</span>
+      {_legend(events)}
+    </div>
+  </div>
+
+  <div class="mapwrap" style="margin-top:16px">
+    <div class="chartlabel">Speed &amp; flagged events</div>
+    {_svg_speed(track, events)}
   </div>
 
   <h2>What happened, minute by minute</h2>
