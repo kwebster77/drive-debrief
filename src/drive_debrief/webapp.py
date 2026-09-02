@@ -7,8 +7,12 @@ Runs on 0.0.0.0:8000 so it maps straight onto a Sparkles preview.
 """
 from __future__ import annotations
 
+import collections
+import html
+import logging
 import os
 import tempfile
+import time
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import HTMLResponse
@@ -23,6 +27,23 @@ from .scoring import summarise
 from .vision import VisionUnavailable, analyse_video, build_vision_report_html
 
 app = FastAPI(title="drive-debrief")
+
+# --- logging: to stdout (sandbox logs) and an in-memory ring for /logs ----
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("drive_debrief.web")
+_RING: "collections.deque[str]" = collections.deque(maxlen=300)
+
+
+class _RingHandler(logging.Handler):
+    def emit(self, record):
+        _RING.append(self.format(record))
+
+
+_ring_handler = _RingHandler()
+_ring_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
+log.addHandler(_ring_handler)
+log.setLevel(logging.INFO)
 
 EXAMPLE_VIDEO = "https://www.youtube.com/watch?v=zBteu7mmQ3s"
 
@@ -68,7 +89,8 @@ HOME = f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
    </form>
  </div>
 
- <div class="foot">Practice feedback, not a substitute for a qualified instructor.</div>
+ <div class="foot">Practice feedback, not a substitute for a qualified instructor. ·
+   <a href="/logs" style="color:#5b6572">activity log</a></div>
 </div></body></html>"""
 
 
@@ -92,12 +114,29 @@ def healthz() -> dict:
     return {"ok": True, "vision_key": bool(os.getenv("ANTHROPIC_API_KEY"))}
 
 
+@app.get("/logs", response_class=HTMLResponse)
+def logs() -> HTMLResponse:
+    lines = "\n".join(_RING) or "(no activity yet — analyse a drive)"
+    return HTMLResponse(
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>activity log</title>"
+        "<meta http-equiv='refresh' content='3'></head>"
+        "<body style='background:#0b0d12;color:#cbd3e1;margin:0;font:13px/1.5 ui-monospace,Menlo,monospace'>"
+        "<div style='padding:14px 18px'><a href='/' style='color:#0091ff'>← back</a> "
+        "· auto-refreshes every 3s</div>"
+        f"<pre style='padding:0 18px 24px;white-space:pre-wrap'>{html.escape(lines)}</pre>"
+        "</body></html>"
+    )
+
+
 @app.post("/analyze", response_class=HTMLResponse)
 async def analyze(file: UploadFile = File(None), url: str = Form(None)) -> HTMLResponse:
-    # GPS path — an uploaded CSV/GPX takes priority.
+    t0 = time.time()
+
+    # GPS path — an uploaded file takes priority.
     if file is not None and file.filename:
         suffix = os.path.splitext(file.filename)[1].lower() or ".csv"
         data = await file.read()
+        log.info("GPS upload: %s (%d bytes)", file.filename, len(data))
         with tempfile.NamedTemporaryFile("wb", suffix=suffix, delete=False) as tmp:
             tmp.write(data)
             path = tmp.name
@@ -105,25 +144,34 @@ async def analyze(file: UploadFile = File(None), url: str = Form(None)) -> HTMLR
             df = load_track(path)
             track, events, summary = analyse_dataframe(df, Thresholds())
             assessment = assess(events)
-            html = build_report_html(track, events, summary, assessment,
-                                     title=f"Debrief — {file.filename}")
-            return HTMLResponse(html)
+            report = build_report_html(track, events, summary, assessment,
+                                       title=f"Debrief — {file.filename}")
+            log.info("GPS ok: %s -> %d/%s, %d events, '%s' in %.2fs",
+                     file.filename, summary.score, summary.grade, len(events),
+                     assessment.verdict, time.time() - t0)
+            return HTMLResponse(report)
         except ValueError as exc:
+            log.warning("GPS parse failed: %s: %s", file.filename, exc)
             return _error_page("Couldn't read that file", str(exc))
         finally:
             os.unlink(path)
 
-    # Video path.
+    # Video path (AI vision).
     if url and url.strip():
+        log.info("Video request: %s", url.strip())
         try:
             result = analyse_video(url.strip())
+            log.info("Video ok: %d frames analysed in %.2fs", result.get("n_frames", 0), time.time() - t0)
             return HTMLResponse(build_vision_report_html(result))
         except VisionUnavailable as exc:
+            log.warning("Video unavailable: %s", exc)
             return _error_page("Video analysis unavailable", str(exc))
-        except Exception as exc:  # keep the demo alive on any downstream error
-            return _error_page("Video analysis failed", str(exc))
+        except Exception as exc:  # keep the demo alive; log the full trace
+            log.exception("Video failed after %.2fs", time.time() - t0)
+            return _error_page("Video analysis failed", f"{type(exc).__name__}: {exc}")
 
-    return _error_page("Nothing to analyse", "Upload a CSV/GPX file or paste a video link.")
+    log.info("Empty request")
+    return _error_page("Nothing to analyse", "Upload a CSV/GPX/KML/JSON file or paste a video link.")
 
 
 def main() -> None:

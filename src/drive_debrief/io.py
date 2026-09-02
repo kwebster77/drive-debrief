@@ -453,3 +453,25 @@ def to_google_records(df: pd.DataFrame, base_iso: str = "2026-01-01T00:00:00+00:
             loc["heading"] = int(round(float(r.course)))
         locs.append(loc)
     return json.dumps({"locations": locs})
+
+
+def to_google_semantic(df: pd.DataFrame, activity_type: str = "IN_PASSENGER_VEHICLE",
+                       base_iso: str = "2026-01-01T00:00:00+00:00") -> str:
+    """Serialise to a Semantic Location History string (for demos/tests)."""
+    base = datetime.datetime.fromisoformat(base_iso)
+
+    def stamp(sec):
+        return (base + datetime.timedelta(seconds=float(sec))).isoformat().replace("+00:00", "Z")
+
+    points = [
+        {"latE7": int(round(r.lat * 1e7)), "lngE7": int(round(r.lon * 1e7)),
+         "timestampMs": str(int((base + datetime.timedelta(seconds=float(r.t))).timestamp() * 1000))}
+        for r in df.itertuples(index=False)
+    ]
+    obj = {"timelineObjects": [{"activitySegment": {
+        "activityType": activity_type,
+        "duration": {"startTimestamp": stamp(df["t"].iloc[0]),
+                     "endTimestamp": stamp(df["t"].iloc[-1])},
+        "simplifiedRawPath": {"points": points},
+    }}]}
+    return json.dumps(obj)

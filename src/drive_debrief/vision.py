@@ -12,11 +12,14 @@ import base64
 import glob
 import html
 import json
+import logging
 import os
 import shutil
 import subprocess
 import tempfile
 from typing import List, Optional
+
+log = logging.getLogger("drive_debrief.vision")
 
 MODEL = "claude-opus-4-8"  # most capable; high-resolution multi-image vision
 
@@ -73,12 +76,23 @@ def download_video(url: str, out_dir: str, max_height: int = 480) -> str:
         raise VisionUnavailable("yt-dlp is not installed (needed to fetch the video).")
     out_tmpl = os.path.join(out_dir, "video.%(ext)s")
     cmd = [
-        "yt-dlp", "-q", "--no-playlist",
+        "yt-dlp", "--no-playlist",
         "-f", f"best[height<={max_height}][ext=mp4]/best[height<={max_height}]/best",
         "-o", out_tmpl, url,
     ]
-    subprocess.run(cmd, check=True, timeout=300)
-    files = [f for f in glob.glob(os.path.join(out_dir, "video.*"))]
+    log.info("Downloading video: %s", url)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").strip().splitlines()[-1:] or ["unknown error"]
+        msg = tail[0]
+        log.warning("yt-dlp failed (%s): %s", proc.returncode, msg)
+        hint = ""
+        if "sign in" in msg.lower() or "bot" in msg.lower() or "403" in msg:
+            hint = (" YouTube often blocks downloads from cloud/datacenter IPs "
+                    "(this is a YouTube block, not the AI review). Try a direct "
+                    "video-file URL, or upload the clip.")
+        raise VisionUnavailable(f"Couldn't download the video: {msg}.{hint}")
+    files = glob.glob(os.path.join(out_dir, "video.*"))
     if not files:
         raise VisionUnavailable("yt-dlp did not produce a video file.")
     return files[0]
@@ -123,13 +137,23 @@ def analyse_frames(frame_paths: List[str], api_key: Optional[str] = None) -> dic
     content: List[dict] = [_image_block(p) for p in frame_paths]
     content.append({"type": "text", "text": _PROMPT})
 
+    log.info("Sending %d frames to %s", len(frame_paths), MODEL)
     resp = client.messages.create(
         model=MODEL,
         max_tokens=2000,
         messages=[{"role": "user", "content": content}],
         output_config={"format": {"type": "json_schema", "schema": _FRAME_SCHEMA}},
     )
+    # A safety decline comes back as HTTP 200 with stop_reason "refusal".
+    if resp.stop_reason == "refusal":
+        cat = getattr(getattr(resp, "stop_details", None), "category", None)
+        log.warning("Model declined the request (category=%s)", cat)
+        raise VisionUnavailable(
+            f"The model declined to analyse this video ({cat or 'policy'}). "
+            "Try a different clip."
+        )
     text = next((b.text for b in resp.content if b.type == "text"), "{}")
+    log.info("Vision analysis received (%d chars)", len(text))
     return json.loads(text)
 
 

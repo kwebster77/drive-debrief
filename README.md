@@ -189,6 +189,21 @@ tests/           31 unit tests (maths, detectors, faults, history, CSV/GPX/KML/G
 Dockerfile       CPU-only image for a cloud sandbox
 ```
 
+## Sample library & batch analysis
+
+Generate a library of believable drives — many routes (suburban, motorway,
+urban stop-go, roundabouts, a dangerous test-fail, a nervous-learner drive…)
+across different cities, times of day, sample rates, noise levels and file
+formats — then analyse them all in one command:
+
+```bash
+make samples   # -> sample_data/library/*  (CSV, GPX, KML, Google records + semantic)
+make batch     # analyse every sample -> out/reports/index.html (score + verdict per drive)
+```
+
+`make batch` is the whole pipeline in one shot: it walks `sample_data/`,
+debriefs each drive, and writes a linked index — handy for CI or a demo.
+
 ## Testing
 
 ```bash
